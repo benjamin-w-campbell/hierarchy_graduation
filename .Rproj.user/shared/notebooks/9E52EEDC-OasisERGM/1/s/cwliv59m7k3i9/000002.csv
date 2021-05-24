@@ -1,0 +1,6 @@
+"0","```r
+cat(\"Higher p-values imply cannot reject the null that they are of the same functional form.  Power Law P-Value: \", bs_pl$p)
+
+```"
+"1","Higher p-values imply cannot reject the null that they are of the same functional form.  Power Law P-Value:  0.116
+"

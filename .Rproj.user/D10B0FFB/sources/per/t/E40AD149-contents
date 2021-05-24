@@ -1,0 +1,635 @@
+---
+title: "Oasis ERGMs"
+author: "B.W. Campbell"
+output:
+  html_document:
+    df_print: paged
+---
+
+This notebook walks through fitting ERGMs on the Oasis data.
+
+```{r data, echo = TRUE, eval = TRUE}
+setwd("~/Dropbox/Projects/Consulting/ERGMs")
+
+
+library(readxl)
+net_dat <- read_excel('Oasis Social Network Data.xlsx')
+
+library(tidyverse)
+el <- net_dat %>%
+  # get key columns
+  select(ID, RoleModels) %>%
+  # drop records where role model wasn't given
+  drop_na() %>%
+  # remove self-loops
+  filter(ID != RoleModels) %>%
+  # rename
+  rename(Sender = ID,
+         Reciever = RoleModels) %>%
+  # make all characters
+  mutate_all(as.character) 
+  
+# construct network
+node_labels <-  sort(unique(c(el$Sender, el$Reciever)))
+n_nodes <- length(node_labels)
+  
+library(network)
+net <- network.initialize(n_nodes, directed = TRUE)
+
+network.vertex.names(net) <- node_labels
+
+net[as.matrix(el)] <- 1
+
+# add vertex attributes
+# out affirm (reciever columns)
+out_affirm <- net_dat %>%
+  # get key columns
+  select(ID, PushUpsGiven_Sender) %>%
+  # drop records where role model wasn't given
+  drop_na() %>%
+  # remove self-loops
+  filter(ID != PushUpsGiven_Sender) %>%
+  select(PushUpsGiven_Sender) %>%
+  # rename
+  rename(ID = PushUpsGiven_Sender) %>%
+  # make all characters
+  mutate_all(as.character) %>%
+  # get out degree
+  group_by(ID) %>%
+  summarise(Affirm_Out = n())
+
+# out correction (reciever columns)
+out_corrections <- net_dat %>%
+  # get key columns
+  select(ID, PullUpsGiven_Sender) %>%
+  # drop records where role model wasn't given
+  drop_na() %>%
+  # remove self-loops
+  filter(ID != PullUpsGiven_Sender) %>%
+  select(PullUpsGiven_Sender) %>%
+  # rename
+  rename(ID = PullUpsGiven_Sender) %>%
+  # make all characters
+  mutate_all(as.character) %>%
+  # get out degree
+  group_by(ID) %>%
+  summarise(Correct_Out = n())
+
+# out advise (reciever columns)
+out_advise <- net_dat %>%
+  # get key columns
+  select(ID, AdviceGiven_Sender) %>%
+  # drop records where role model wasn't given
+  drop_na() %>%
+  # remove self-loops
+  filter(ID != AdviceGiven_Sender) %>%
+  select(AdviceGiven_Sender) %>%
+  # rename
+  rename(ID = AdviceGiven_Sender) %>%
+  # make all characters
+  mutate_all(as.character) %>%
+  # get out degree
+  group_by(ID) %>%
+  summarise(Advice_Out = n())
+
+# Self Stigma, Time in Program
+vertex_dat <- read_excel('Oasis Residential Survey.xlsx')
+
+stig_time <- vertex_dat %>%
+  # get key columns
+  select(ID, Race_Category, Time_in_TC, SelfStigTot) %>%
+  mutate(ID = as.character(ID))
+
+# TCU score
+tcu_dat <- read_excel('Oasis Members for ORAS PIT.xlsx')
+
+tcu <- tcu_dat %>%
+  # get key columns
+  select(ID, TCUSCORE) %>%
+  mutate(ID = as.character(ID))
+
+# ACE total
+ace_dat <- read_excel('Oasis ACEs Data.xlsx')
+
+ace <- ace_dat %>%
+  select(ID, Total) %>%
+  rename(ACE_Total = Total) %>%
+  mutate(ID = as.character(ID),
+         ACE_Total = as.numeric(ACE_Total))
+
+impute_race <- median(stig_time$Race_Category, na.rm = TRUE)
+impute_time <- median(stig_time$Time_in_TC, na.rm = TRUE)
+impute_stig <- median(stig_time$SelfStigTot, na.rm = TRUE)
+impute_out <- 0
+impute_tcu <- median(tcu$TCUSCORE, na.rm = TRUE)
+impute_ace <- median(ace$ACE_Total, na.rm = TRUE)
+
+# Join these all together
+full_vertex_dat <- stig_time %>%
+  inner_join(tcu, by = "ID") %>%
+  inner_join(ace, by = "ID") %>%
+  left_join(out_advise, by = "ID") %>%
+  left_join(out_affirm, by = "ID") %>%
+  left_join(out_corrections, by = "ID") %>%
+  # impute missing values
+  replace_na(list(Advice_Out = impute_out,
+                  Affirm_Out = impute_out, 
+                  Correct_Out = impute_out,
+                  Race_Category = impute_race,
+                  Time_in_TC = impute_time,
+                  SelfStigTot = impute_stig,
+                  TCUSCORE = impute_tcu,
+                  ACE_Total = impute_ace)) %>%
+  arrange(ID)
+  
+cols_to_add <- colnames(full_vertex_dat)[2:ncol(full_vertex_dat)]
+
+for(i in cols_to_add){
+  set.vertex.attribute(net, i, deframe(full_vertex_dat[,i]))
+}
+
+net
+```
+
+
+```{r plot,echo=TRUE, eval=TRUE}
+library(GGally)
+ggnet2(net, node.color = "black", node.size = 5, arrow.size = 7, arrow.gap = 0.015) 
+library(sna)
+
+degree_dist <- degree(net, cmode = "indegree")
+
+library(ggplot2)
+ggplot() +
+  aes(degree_dist) +
+  geom_histogram(bins = 10) +
+  xlab("In-Degree") +
+  ylab("Frequency") +
+  ggtitle("Degree Distribution for Role Model Network") +
+  theme_bw()
+  
+```
+
+```{r plaw, echo=TRUE, eval=TRUE}
+library(poweRlaw)
+degree_dist_red <- degree_dist[degree_dist>0]
+m_pl <- displ$new(degree_dist_red)
+est_pl <- estimate_xmin(m_pl)
+
+m_pl$setXmin(est_pl)
+plot_data <- plot(m_pl, draw = F)
+fit_data <- lines(m_pl, draw = F)
+
+ggplot(plot_data) + 
+  geom_point(aes(x=log(x), y=log(y))) + 
+  labs(x="log(k)", y="log(CDF)") +
+  theme_bw() + 
+  geom_line(data=fit_data, aes(x=log(x), y=log(y)), colour="red")   +
+  ggtitle("Log-Log Plot of Degree Distribution")
+
+bs_pl <- bootstrap_p(m_pl, no_of_sims=1000, threads=8, seed = 123)
+
+plot(bs_pl)
+
+df_bs_pl <- bs_pl$bootstraps
+
+bs_pl$p
+
+
+#powerlaw
+m_pl = displ$new(degree_dist_red)
+est_pl <- estimate_xmin(m_pl)
+m_pl$setXmin(est_pl)
+
+bs_pl <- bootstrap_p(m_pl, no_of_sims=1000, threads=3, seed = 123)
+
+#lognormal
+m_ln = dislnorm$new(degree_dist_red)
+est_ln <- estimate_xmin(m_ln)
+m_ln$setXmin(est_ln)
+
+bs_ln <- bootstrap_p(m_ln, no_of_sims=1000, threads=3, seed = 123)
+
+#exponential
+m_exp = disexp$new(degree_dist_red)
+est_exp <- estimate_xmin(m_exp)
+m_exp$setXmin(est_exp)
+
+bs_exp <- bootstrap_p(m_exp, no_of_sims=1000, threads=3, seed = 123)
+
+#poisson
+m_poi = dispois$new(degree_dist_red)
+est_poi <- estimate_xmin(m_poi)
+m_poi$setXmin(est_poi)
+
+bs_pois <- bootstrap_p(m_poi, no_of_sims=1000, threads=3, seed = 123)
+
+cat("Higher p-values imply cannot reject the null that they are of the same functional form.  Power Law P-Value: ", bs_pl$p)
+cat("Higher p-values imply cannot reject the null that they are of the same functional form.  Lognormal P-Value: ", bs_ln$p)
+cat("Higher p-values imply cannot reject the null that they are of the same functional form.  Expontential P-Value: ", bs_exp$p)
+cat("Higher p-values imply cannot reject the null that they are of the same functional form.  Poisson P-Value: ", bs_pois$p)
+
+```
+
+```{r ergms, echo=TRUE, eval=TRUE}
+library(ergm)
+
+fit_1 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+                ostar(4) +
+             #  nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+             #  nodeocov("ACE_Total") +
+                nodeicov("ACE_Total") +
+             #  nodeocov("TCUSCORE") +
+                nodeicov("TCUSCORE") +
+             #  nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") #+
+              #  nodeocov("Affirm_Out") +
+             #   nodeocov("Correct_Out") +
+              #  nodeocov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_1)
+summary(fit_1)
+
+fit_2 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+                ostar(4) +
+              #  istar(4) +
+               nodeocov("SelfStigTot") +
+              #  nodeicov("SelfStigTot") +
+               nodeocov("ACE_Total") +
+              #  nodeicov("ACE_Total") +
+               nodeocov("TCUSCORE") +
+              #  nodeicov("TCUSCORE") +
+               nodeocov("Time_in_TC") #+
+              #  nodeicov("Time_in_TC") #+
+              #  nodeocov("Affirm_Out") +
+             #   nodeocov("Correct_Out") +
+              #  nodeocov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_2)
+summary(fit_2)
+
+fit_3 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+                ostar(4) +
+              #  istar(4) +
+               nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+               nodeocov("ACE_Total") +
+                nodeicov("ACE_Total") +
+               nodeocov("TCUSCORE") +
+                nodeicov("TCUSCORE") +
+               nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") #+
+              #  nodeocov("Affirm_Out") +
+             #   nodeocov("Correct_Out") +
+              #  nodeocov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_3)
+summary(fit_3)
+
+
+
+fit_4 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+                ostar(4) +
+              #  istar(4) +
+               nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+               nodeocov("ACE_Total") +
+                nodeicov("ACE_Total") +
+               nodeocov("TCUSCORE") +
+                nodeicov("TCUSCORE") +
+               nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") +
+                nodeocov("Affirm_Out") +
+                nodeocov("Correct_Out") +
+                nodeocov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_4)
+summary(fit_4)
+
+fit_5 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+                ostar(4) +
+              #  istar(4) +
+               nodeocov("SelfStigTot") +
+            #    nodeicov("SelfStigTot") +
+               diff("SelfStigTot", dir="h-t") +
+               nodeocov("ACE_Total") +
+            #    nodeicov("ACE_Total") +
+              diff("ACE_Total", dir="h-t") +  
+               nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+               diff("TCUSCORE", dir="h-t") +
+               nodeocov("Time_in_TC") +
+             #   nodeicov("Time_in_TC") +
+               diff("Time_in_TC", dir="h-t") +
+                nodeocov("Affirm_Out") +
+               diff("Affirm_Out", dir="h-t") +
+                nodeocov("Correct_Out") +
+              diff("Correct_Out", dir="h-t") +
+                nodeocov("Advice_Out") +
+              diff("Advice_Out", dir="h-t")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_5)
+summary(fit_5)
+fit_5_gof <- gof(fit_5)
+plot(fit_5_gof)
+
+# need to account for indegree and geodesic distance
+
+fit_6 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+                gwidegree(0.1, fixed=TRUE)+
+               nodeocov("SelfStigTot") +
+            #    nodeicov("SelfStigTot") +
+               diff("SelfStigTot", dir="h-t") +
+               nodeocov("ACE_Total") +
+            #    nodeicov("ACE_Total") +
+              diff("ACE_Total", dir="h-t") +  
+               nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+               diff("TCUSCORE", dir="h-t") +
+               nodeocov("Time_in_TC") +
+             #   nodeicov("Time_in_TC") +
+               diff("Time_in_TC", dir="h-t") +
+                nodeocov("Affirm_Out") +
+               diff("Affirm_Out", dir="h-t") +
+                nodeocov("Correct_Out") +
+              diff("Correct_Out", dir="h-t") +
+                nodeocov("Advice_Out") +
+              diff("Advice_Out", dir="h-t")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_6)
+summary(fit_6)
+fit_6_gof <- gof(fit_6)
+plot(fit_6_gof)
+
+
+fit_7 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+                gwidegree(0.1, fixed=TRUE)+
+                gwodegree(0.1, fixed=TRUE)+
+               nodeocov("SelfStigTot") +
+            #    nodeicov("SelfStigTot") +
+               diff("SelfStigTot", dir="h-t") +
+               nodeocov("ACE_Total") +
+            #    nodeicov("ACE_Total") +
+              diff("ACE_Total", dir="h-t") +  
+               nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+               diff("TCUSCORE", dir="h-t") +
+               nodeocov("Time_in_TC") +
+             #   nodeicov("Time_in_TC") +
+               diff("Time_in_TC", dir="h-t") +
+                nodeocov("Affirm_Out") +
+               diff("Affirm_Out", dir="h-t") +
+                nodeocov("Correct_Out") +
+              diff("Correct_Out", dir="h-t") +
+                nodeocov("Advice_Out") +
+              diff("Advice_Out", dir="h-t")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_7)
+summary(fit_7)
+fit_7_gof <- gof(fit_7)
+plot(fit_7_gof)
+
+fit_8<- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+                gwidegree(0.1, fixed=TRUE)+
+                gwodegree(0.1, fixed=TRUE)+
+               gwesp(0.1, fixed=TRUE)+
+               nodeocov("SelfStigTot") +
+            #    nodeicov("SelfStigTot") +
+               diff("SelfStigTot", dir="h-t") +
+               nodeocov("ACE_Total") +
+            #    nodeicov("ACE_Total") +
+              diff("ACE_Total", dir="h-t") +  
+               nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+               diff("TCUSCORE", dir="h-t") +
+               nodeocov("Time_in_TC") +
+             #   nodeicov("Time_in_TC") +
+               diff("Time_in_TC", dir="h-t") +
+                nodeocov("Affirm_Out") +
+               diff("Affirm_Out", dir="h-t") +
+                nodeocov("Correct_Out") +
+              diff("Correct_Out", dir="h-t") +
+                nodeocov("Advice_Out") +
+              diff("Advice_Out", dir="h-t")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_8)
+summary(fit_8)
+fit_8_gof <- gof(fit_8)
+plot(fit_8_gof)
+
+# per keith conversation
+fit_9 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+                gwidegree(0.1, fixed=TRUE)+
+                gwodegree(0.1, fixed=TRUE)+
+               gwesp(0.1, fixed=TRUE)+
+              # nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+            #   diff("SelfStigTot", dir="h-t") +
+            #   nodeocov("ACE_Total") +
+                nodeicov("ACE_Total") +
+            #  diff("ACE_Total", dir="h-t") +  
+            #   nodeocov("TCUSCORE") +
+                nodeicov("TCUSCORE") +
+            #   diff("TCUSCORE", dir="h-t") +
+             #  nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") +
+               diff("Time_in_TC", dir="h-t") +
+                nodeicov("Affirm_Out") +
+            #   diff("Affirm_Out", dir="h-t") +
+                nodeicov("Correct_Out") +
+              #diff("Correct_Out", dir="h-t") +
+                nodeicov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_9)
+summary(fit_9)
+fit_9_gof <- gof(fit_9)
+plot(fit_9_gof)
+
+fit_10 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+                gwidegree(0.1, fixed=TRUE)+
+                gwodegree(0.1, fixed=TRUE)+
+               gwesp(0.1, fixed=TRUE)+
+              # nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+            #   diff("SelfStigTot", dir="h-t") +
+            #   nodeocov("ACE_Total") +
+                nodeicov("ACE_Total") +
+            #  diff("ACE_Total", dir="h-t") +  
+            #   nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+            #   diff("TCUSCORE", dir="h-t") +
+             #  nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") +
+           #    diff("Time_in_TC", dir="h-t") +
+                nodeicov("Affirm_Out") 
+            #   diff("Affirm_Out", dir="h-t") +
+             #   nodeicov("Correct_Out") 
+              #diff("Correct_Out", dir="h-t") +
+              #  nodeicov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_10)
+summary(fit_10)
+fit_10_gof <- gof(fit_10)
+plot(fit_10_gof)
+
+
+fit_11 <- ergm(net ~
+                edges +
+                #dgwdsp(decay = 0.5, type = "OSP") #+
+               # dgwesp(decay = 0.1, type = "OSP") #+
+                mutual +
+               # ostar(2) +
+              #  istar(2) +
+             #   gwidegree(0.1, fixed=TRUE)+ # adding this nulls the selfstig
+                gwodegree(0.1, fixed=TRUE)+
+          #     gwesp(0.1, fixed=TRUE)+
+              # nodeocov("SelfStigTot") +
+                nodeicov("SelfStigTot") +
+            #   diff("SelfStigTot", dir="h-t") +
+            #   nodeocov("ACE_Total") +
+              #  nodeicov("ACE_Total") +
+            #  diff("ACE_Total", dir="h-t") +  
+            #   nodeocov("TCUSCORE") +
+            #    nodeicov("TCUSCORE") +
+            #   diff("TCUSCORE", dir="h-t") +
+             #  nodeocov("Time_in_TC") +
+                nodeicov("Time_in_TC") + # adding this makes self-stig insig
+           #    diff("Time_in_TC", dir="h-t") +
+                nodeicov("Affirm_Out") 
+            #   diff("Affirm_Out", dir="h-t") +
+             #   nodeicov("Correct_Out") 
+              #diff("Correct_Out", dir="h-t") +
+              #  nodeicov("Advice_Out")
+            ,
+              control = control.ergm(
+                #MCMC.interval = 2048,
+                #MCMC.burnin = 12500,
+                MCMLE.maxit = 25,
+                seed = 12345
+              ))
+mcmc.diagnostics(fit_11)
+summary(fit_11)
+fit_11_gof <- gof(fit_11)
+plot(fit_11_gof)
+
+# SelfStig effect is really finicky.  
+```
+
+
+```{r table, echo = TRUE, eval = TRUE}
+library(texreg)
+
+wordreg(l=list(fit_1, fit_2, fit_3, fit_4, fit_5, fit_6, fit_7, fit_8), file="oasis1.doc")
+wordreg(l=list(fit_9, fit_10, fit_11), file="oasis2.doc")
+```

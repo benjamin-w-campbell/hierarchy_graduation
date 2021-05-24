@@ -1,0 +1,17 @@
+"0","```r
+library(GGally)
+ggnet2(net, node.color = \"black\", node.size = 5, arrow.size = 7, arrow.gap = 0.015) 
+library(sna)
+
+degree_dist <- degree(net, cmode = \"indegree\")
+
+library(ggplot2)
+ggplot() +
+  aes(degree_dist) +
+  geom_histogram(bins = 10) +
+  xlab(\"In-Degree\") +
+  ylab(\"Frequency\") +
+  ggtitle(\"Degree Distribution for Role Model Network\") +
+  theme_bw()
+  
+```"

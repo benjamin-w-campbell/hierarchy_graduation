@@ -1,0 +1,488 @@
+---
+title: "Hierarchy in a TC, Facility 3 Women"
+author: "Benjamin W. Campbell"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+# Introduction
+This notebook is for a project related to modeling the hierarchy within a TC clinical setting, looking specifically at corrections and whether many of our prior expectations about hierarchy within the TC environment hold.  For example, does maximum position within the hierarchy correlate with outcomes, such as graduation?
+
+# Create Network Objects
+The first step is to load in the data.  We want weighted, directed networks of corrections at the weekly level.
+
+```{r load_data, echo=TRUE, eval=TRUE, message = FALSE, warning = TRUE}
+## set up working directory
+wd <- getwd()
+setwd(wd)
+
+## load corrections edgelist
+edgelist <- read.table(paste0(wd,"/data/F3F-ledge"), stringsAsFactors = FALSE)
+
+## process data
+library(tidyverse)
+library(lubridate)
+
+edgelist_cleaned <- edgelist %>%
+  rename(Date = V1, Sender = V2, Reciever = V3, Weight = V4) %>%
+  filter(Sender != 0) %>%
+  group_by(Date, Sender, Reciever) %>%
+  summarize(Weight = sum(Weight))
+
+summary(edgelist_cleaned$Weight)
+
+edgelist_cleaned$Date <- mdy(edgelist_cleaned$Date)
+
+## get t time stamp
+edgelist_cleaned$t <- as.numeric(round(difftime(edgelist_cleaned$Date, min(edgelist_cleaned$Date), units = "weeks"))+1)
+# get in rank
+edgelist_cleaned$t <- match(edgelist_cleaned$t, sort(unique(edgelist_cleaned$t)))
+
+## aggregate to week
+edgelist_weekly <- edgelist_cleaned %>%
+  group_by(Sender, Reciever, t) %>%
+  summarize(Weight = sum(Weight)) %>%
+  arrange(t)
+
+head(edgelist_weekly)
+
+summary(edgelist_weekly$Weight)
+
+## get into network format
+library(igraph)
+t_steps <- sort(unique(edgelist_weekly$t))
+net_list <- as.list(rep(NA, length(t_steps)))
+index = 0
+
+## function to make network for time slice
+create_network <- function(edgelist, t){
+  # reduce edgelist to time t
+  t_slice <- edgelist[edgelist$t == t,]
+  t_graph <- graph.data.frame(t_slice, directed = TRUE)
+  # return network
+  return(t_graph)
+}
+
+## populate list
+for(t in t_steps){
+  # increment index
+  index = index+1
+  # create network
+  net <- create_network(edgelist_weekly, t)
+  # insert into index'ed element of list
+  net_list[[index]] <- net
+}
+```
+
+# Calculate Eigenvector Centrality
+`net_list` now contains a list of weighted and directed `igraph` objects.  With this list, we can then go on to compute eigenvector centrality at the weekly level for every node.  
+
+```{r get_eigen, echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE}
+# make function
+get_eigen_table <- function(graph, t){
+  # get weighted eigenvector centrality
+  scores <- eigen_centrality(graph, weights = E(graph)$Weight, directed = TRUE)$vector
+  # put in table
+  t_df <- tibble(
+    Id = as.character(names(scores)),
+    t = as.integer(t),
+    eigen_cent = as.numeric(scores)
+  )
+  # return table
+  return(t_df)
+}
+
+# initialize empty dataframe
+eigen_df <- tibble()
+
+# loop through
+for(t in 1:length(net_list)){
+  # get one network
+  net <- net_list[[t]]
+  # get dataframe
+  t_df <- get_eigen_table(net, t)
+  # bind to original dataframe
+  eigen_df <- bind_rows(eigen_df, t_df)
+}
+
+head(eigen_df)
+
+ggplot(eigen_df, aes(x = eigen_cent)) +
+  geom_histogram(colour="black", bins = 60) +
+  theme_bw() +
+  ggtitle("Distribution of Eigenvector Centrality") +
+  xlab("Eigenvector Centrality") +
+  ylab("Count")
+
+```
+
+# Create Variables
+So, given that we have an eigenvector centrality that is measured longitudinally, but only have a single observation of the outcome, how do we collapse this measure?  
+
+* We could look at minimum eigenvector centrality, which would tell us about the highest position in the hierarchy that anyone ever achieves. 
+* We could look at maximum eigenvector centrality, which would tell us about the lowest position in the hierarchy that anyone ever achieves.
+* we could look at average or median eigenvector centrality, which would tell us something about the central tendency of someone in the networ with respect to where they are in the hierarchy.  
+* We could look at any of the prior measures over their last month or something there.  This would tell us in general how well they do towards the end of their tenure.  
+
+```{r calculate_variables, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE}
+# min. eigen centrality -- highest position ever achieved in hierarchy
+# max. eigen centrality -- lowest position ever achieved in hierarchy
+# mean eigen centrality -- average position in the hierarchy
+# median eigen centrality -- another measure of central tendency
+nodal_eigen <- eigen_df %>%
+  group_by(Id) %>%
+  summarize(min_eigen_cent = min(eigen_cent),
+            max_eigen_cent = max(eigen_cent),
+            mean_eigen_cent = mean(eigen_cent),
+            median_eigen_cent = median(eigen_cent))
+
+# plot df
+plot_df <- nodal_eigen %>% 
+  gather("Variable", "Value",-Id)
+  
+
+ggplot(plot_df, aes(x = Value, fill = Variable)) +
+  geom_density(colour="black", alpha = 0.75) +
+  theme_bw() +
+  ggtitle("Density of Eigenvector Centrality Variables") +
+  xlab("Variable Value") +
+  ylab("Density")  + 
+  facet_wrap(vars(Variable), scales = 'free')
+
+# Summaries
+summary(nodal_eigen)
+  
+```
+
+  
+
+```{r last_month, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE, fig.width = 12, fig.height = 8}
+
+get_last_month_variables <- function(id){
+  id_df <- eigen_df %>% 
+    filter(Id == id) %>% 
+    arrange(t) %>% 
+    tail(4) %>%
+    summarize(Id = unique(Id),
+              last_month_min_eigen_cent = min(eigen_cent),
+              last_month_max_eigen_cent = max(eigen_cent),
+              last_month_mean_eigen_cent = mean(eigen_cent),
+              last_month_median_eigen_cent = median(eigen_cent))
+  return(id_df)
+}
+
+ids <- unique(eigen_df$Id)
+
+last_month_df <- tibble()
+
+for(i in ids){
+  id_df <- get_last_month_variables(i)
+  last_month_df <- bind_rows(last_month_df, id_df)
+}
+
+# plot df
+plot_df_full <- last_month_df %>% 
+  gather("Variable", "Value",-Id) %>%
+  bind_rows(plot_df)
+  
+
+ggplot(plot_df_full, aes(x = Value, fill = Variable)) +
+  geom_density(colour="black",  alpha = 0.75) +
+  theme_bw() +
+  ggtitle("Density of Eigenvector Centrality Variables") +
+  xlab("Variable Value") +
+  ylab("Density") + 
+  facet_wrap(vars(Variable), scales = 'free', nrow = 3)
+
+# Summaries
+summary(last_month_df)
+```
+
+
+```{r first_month, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE, fig.width = 12, fig.height = 8}
+
+get_first_month_variables <- function(id){
+  id_df <- eigen_df %>% 
+    filter(Id == id) %>% 
+    arrange(t) %>% 
+    head(4) %>%
+    summarize(Id = unique(Id),
+              first_month_min_eigen_cent = min(eigen_cent),
+              first_month_max_eigen_cent = max(eigen_cent),
+              first_month_mean_eigen_cent = mean(eigen_cent),
+              first_month_median_eigen_cent = median(eigen_cent))
+  return(id_df)
+}
+
+ids <- unique(eigen_df$Id)
+
+first_month_df <- tibble()
+
+for(i in ids){
+  id_df <- get_first_month_variables(i)
+  first_month_df <- bind_rows(first_month_df, id_df)
+}
+
+# plot df
+plot_df_full <- first_month_df %>% 
+  gather("Variable", "Value",-Id) %>%
+  bind_rows(plot_df)
+  
+
+ggplot(plot_df_full, aes(x = Value, fill = Variable)) +
+  geom_density(colour="black",  alpha = 0.75) +
+  theme_bw() +
+  ggtitle("Density of Eigenvector Centrality Variables") +
+  xlab("Variable Value") +
+  ylab("Density") + 
+  facet_wrap(vars(Variable), scales = 'free', nrow = 3)
+
+# Summaries
+summary(first_month_df)
+```
+
+
+# Join to Node Data
+With the measures of hierarchy created, we can now process the node data and join these variables to it.  Once all of that is taken care of we can move on to analysis! 
+
+```{r node_data, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE}
+# read node data
+nodes <- read.table(paste0(wd,"/data/F3F"), stringsAsFactors = FALSE, header = TRUE)
+
+sum(!is.na(nodes$wcid))
+
+# get total unique nodes
+length(unique(nodes$wcid))
+
+# get days in program
+nodes$days_in_program <- as.Date(as.character(nodes$exit), format="%m/%d/%Y")-as.Date(as.character(nodes$enter), format="%m/%d/%Y")
+
+# process recidivism
+nodes$recidFlag <- rep(0, times = nrow(nodes))
+nodes$recidFlag[!(is.na(nodes$recidate1))] <- 1
+  
+nodes$recidDate <- as.character(nodes$recidate1)
+nodes[is.na(nodes$recidDate),]$recidDate <- "09/04/2009"
+
+nodes$gap <- as.Date(as.character(nodes$recidDate), format="%m/%d/%Y")-as.Date(as.character(nodes$exit), format="%m/%d/%Y")
+
+# remove folks who visit multiple times
+repeat_visitors <- names(which(table(nodes$wcid) > 1))
+
+nodes <- nodes[!(nodes$wcid %in% repeat_visitors),]
+
+# join network variables
+# first rename Id to wcid
+dat <- nodes %>%
+  rename(Id = wcid) %>%
+  select(Id, age, lsi, lsiExit, black, success, recidFlag, recidDate, gap, days_in_program) %>%
+  inner_join(last_month_df, by = "Id") %>%
+  inner_join(first_month_df, by = "Id") %>%
+  inner_join(nodal_eigen, by = "Id")
+
+dat$days_in_program <- as.numeric(dat$days_in_program)
+
+head(dat)
+```
+
+# Exploratory Data Analysis
+We've got the data put together, now is time to think about the relationship between these key variables and TC outcomes like graduation.  The following network variables we think might matter most based upon their distributions:
+
+* `last_month_max_eigen_cent`
+* `last_month_mean_eigen_cent`
+* `max_eigen_cent`
+* `mean_eigen_cent`
+
+```{r correlations, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE}
+# Neg, sig - as lower in hierarchy towards the end, less likely to be successful
+cor.test(dat$last_month_max_eigen_cent, dat$success)
+
+# Neg, sig - as lower in hierarchy towards the end, less likely to be successful
+cor.test(dat$last_month_mean_eigen_cent, dat$success)
+
+# Neg, sig - as lower in hierarchy, less likely to be successful
+cor.test(dat$max_eigen_cent, dat$success)
+
+# Neg, sig - as lower in hierarchy, less likely to be successful
+cor.test(dat$mean_eigen_cent, dat$success)
+
+```
+
+
+# Modeling Graduation
+The first and most easy thing we could do is use simple linear modeling to examine the effect of some of these covariates on graduation, while controlling for the confounding effects of other variables.  Here we will fit those models and show results:
+
+```{r success_models, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE}
+last_month_max_model <- glm(success ~
+                              age +
+                              lsiExit +
+                              black +
+                              days_in_program +
+                              last_month_max_eigen_cent,
+                            data = dat,
+                            family = binomial(link = 'logit'))
+
+last_month_mean_model <- glm(success ~
+                              age +
+                              lsiExit +
+                              black +
+                              days_in_program +
+                              last_month_mean_eigen_cent,
+                            data = dat,
+                            family = binomial(link = 'logit'))
+
+max_model <- glm(success ~
+                   age +
+                   lsiExit +
+                   black +
+                   days_in_program +
+                   max_eigen_cent,
+                 data = dat,
+                 family = binomial(link = 'logit'))
+
+mean_model <- glm(success ~
+                   age +
+                   lsiExit +
+                   black +
+                   days_in_program +
+                   mean_eigen_cent,
+                 data = dat,
+                 family = binomial(link = 'logit'))
+
+library(texreg)
+screenreg(l = list(last_month_max_model, last_month_mean_model, max_model, mean_model))
+```
+
+
+```{r pred_prob_plots, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE, fig.width = 12, fig.height = 12}
+
+get_pred_prob_plot <- function(model, xvar, xlab){
+  std <- qnorm(0.95 / 2 + 0.5)
+  
+  #last_month_max_eigen_cent_plot
+  data = model$data
+  new_data <- data.frame(
+    age = rep(mean(data$age, na.rm = TRUE), nrow(data)),
+    lsiExit = rep(mean(data$lsiExit, na.rm = TRUE), nrow(data)),
+    black = rep(0, nrow(data)),
+    days_in_program = rep(mean(data$days_in_program, na.rm = TRUE), nrow(data)),
+    stupid_placeholder = data[,xvar]
+  )
+  
+  colnames(new_data)[5] <- xvar
+  
+  predicted_data <- as.data.frame(predict(model, newdata = new_data,
+                                            type="link", se=TRUE))
+  
+  new_data <- cbind(new_data, predicted_data)
+  new_data$ymin <- model$family$linkinv(new_data$fit - std * new_data$se)
+  new_data$ymax <- model$family$linkinv(new_data$fit + std * new_data$se)
+  new_data$fit <- model$family$linkinv(new_data$fit)
+  
+  library(ggplot2)
+  p  <- ggplot(new_data, aes(x=new_data[,xvar])) +
+    geom_ribbon(data = new_data, aes(y=fit, ymin=ymin, ymax=ymax), alpha = 0.5) +
+    geom_line(data = new_data, aes(x = new_data[,xvar], y=fit), size = 1.5, colour = "firebrick4") +
+    scale_y_continuous(limits=c(0,1)) +
+    theme_bw() + 
+    theme(legend.position = c(0.2, 0.8),
+          axis.text=element_text(size=12),
+          axis.title=element_text(size=14,face="bold"))+
+    labs(x=xlab, y="Probability of Graduation") 
+  
+  return(p)
+}
+
+last_month_max_pred_prob <- get_pred_prob_plot(last_month_max_model, 
+                                               "last_month_max_eigen_cent",
+                                               "Last Month's Highest Eigenvector Centrality")
+
+last_month_mean_pred_prob <- get_pred_prob_plot(last_month_mean_model, 
+                                               "last_month_mean_eigen_cent",
+                                               "Last Month's Average Eigenvector Centrality")
+
+max_eigen_cent_pred_prob <- get_pred_prob_plot(max_model, 
+                                               "max_eigen_cent",
+                                               "Highest Eigenvector Centrality")
+mean_eigen_cent_pred_prob <- get_pred_prob_plot(mean_model, 
+                                               "mean_eigen_cent",
+                                               "Average Eigenvector Centrality")
+
+library(Rmisc)
+multiplot(plotlist = list(last_month_max_pred_prob, last_month_mean_pred_prob, max_eigen_cent_pred_prob, mean_eigen_cent_pred_prob),
+          cols = 2)
+
+```
+
+
+```{r prob_dist, echo = TRUE, eval = TRUE, message = FALSE, warning = TRUE, fig.width = 12, fig.height = 12}
+
+get_pred_prob_dist <- function(model, xvar){
+  data = model$data
+  
+  mean <- mean(data[,xvar], na.rm = TRUE)
+  std <- sd(data[,xvar], na.rm = TRUE)
+  input_vec <- c(mean-2*std, mean-1*std, mean, mean+1*std, mean+2*std)
+  
+  new_data <- data.frame(
+    age = rep(mean(data$age, na.rm = TRUE), length(input_vec)),
+    lsiExit = rep(mean(data$lsiExit, na.rm = TRUE), length(input_vec)),
+    black = rep(0, length(input_vec)),
+    days_in_program = rep(mean(data$days_in_program, na.rm = TRUE), length(input_vec)),
+    stupid_placeholder = input_vec
+  )
+  
+  colnames(new_data)[5] <- xvar
+  
+  predicted_data <- as.data.frame(predict(model, newdata = new_data,
+                                            type="link", se=TRUE))
+  
+  probs <- model$family$linkinv(predicted_data$fit) 
+  
+  return(probs)
+}
+
+# 2 std below mean, 1 std below mean, mean, 1 std above, 2 std above
+get_pred_prob_dist(last_month_max_model, 
+                   "last_month_max_eigen_cent")
+
+# 2 std below mean, 1 std below mean, mean, 1 std above, 2 std above
+get_pred_prob_dist(last_month_mean_model, 
+                   "last_month_mean_eigen_cent")
+
+# 2 std below mean, 1 std below mean, mean, 1 std above, 2 std above
+get_pred_prob_dist(max_model, 
+                   "max_eigen_cent")
+
+# 2 std below mean, 1 std below mean, mean, 1 std above, 2 std above
+get_pred_prob_dist(mean_model, 
+                   "mean_eigen_cent")
+
+```
+
+
+# Descriptive Stats
+
+```{r descriptives, echo = TRUE, eval = TRUE}
+max(edgelist_cleaned$Date)-min(edgelist_cleaned$Date)
+
+summary(dat)
+
+apply(dat, 2, function(x) sd(x, na.rm = TRUE))
+
+```
+
+# Session Info
+```{r sessionInfo, echo=TRUE, eval=TRUE}
+sessionInfo()
+```

@@ -1,0 +1,20 @@
+"0","```r
+net
+
+```"
+"1"," Network attributes:
+  vertices = 78 
+  directed = TRUE 
+  hyper = FALSE 
+  loops = FALSE 
+  multiple = FALSE 
+  bipartite = FALSE 
+  total edges= 204 
+    missing edges= 0 
+    non-missing edges= 204 
+
+ Vertex attribute names: 
+    ACE_Total Advice_Out Affirm_Out Correct_Out Race_Category SelfStigTot TCUSCORE Time_in_TC vertex.names 
+
+No edge attributes
+"
